@@ -1,38 +1,51 @@
-#pragma once
+#ifndef GAMEBOARD_H
+#define GAMEBOARD_H
 
 #include <QWidget>
 #include <QVector>
 #include <QPoint>
+
+const int BOARD_SIZE = 10;
+
 class GameBoard : public QWidget
 {
     Q_OBJECT
 public:
-    enum class ShipSize {
-        BATTLESHIP = 4,
-        CRUISER = 3,
-        DESTROYER = 2,
-        SUBMARINE = 1
+    enum CellState {
+        EMPTY = 0,
+        SHIP = 1,
+        HIT = 2,
+        MISS = 3,
+        SUNK = 4
     };
 
-    enum CellState {
-        EMPTY,
-        SHIP,
-        HIT,
-        MISS,
-        SUNK
+    enum ShipSize {
+        SUBMARINE = 1,
+        DESTROYER = 2,
+        CRUISER = 3,
+        BATTLESHIP = 4
     };
+
+    static const int GRID_SIZE = 10;
+    static const int CELL_SIZE = 30;
+    static const int MARGIN = 20;
 
     explicit GameBoard(bool isPlayerBoard, QWidget *parent = nullptr);
-
     void reset();
     void setPlacementMode(bool enabled);
     bool placeShip(const QPoint& bow, ShipSize size, bool horizontal);
     bool canPlaceShip(const QPoint& bow, ShipSize size, bool horizontal) const;
     CellState checkShot(const QPoint& position) const;
-    bool allShipsSunk() const;
     void markShot(const QPoint& position, CellState result);
-    bool placeRandomShips(int maxTotalAttempt);
+    bool allShipsSunk() const;
+    bool placeRandomShips(int maxTotalAttempts = 1000);
     bool isValidShipPlacement() const;
+    QVector<QVector<int>> getBoard() const;
+    void setBoard(const QVector<QVector<int>>& board);
+    int getShipSizeAt(const QPoint& position) const;
+    void clearBoard();
+    void markHit(const QPoint& position);
+    void markMiss(const QPoint& position);
 
 signals:
     void cellClicked(const QPoint& position);
@@ -48,10 +61,9 @@ private:
     bool isShipSunk(const QPoint& position) const;
     void markSunk(const QPoint& position);
 
+    QVector<QVector<CellState>> m_board;
     bool m_isPlayerBoard;
     bool m_placementMode;
-    QVector<QVector<CellState>> m_board;
-    static const int GRID_SIZE = 10;
-    static const int CELL_SIZE = 30;
-    static const int MARGIN = 2;
 };
+
+#endif // GAMEBOARD_H
