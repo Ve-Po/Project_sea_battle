@@ -3,17 +3,19 @@
 GameServer::GameServer(QObject *parent) : QObject(parent) {
     m_socket = new QUdpSocket(this);
     m_gameTimer = new QTimer(this);
-    m_gameTimer->setInterval(300000); // 5 минут на игру
+    m_gameTimer->setInterval(GAME_TIMEOUT);
     connect(m_gameTimer, &QTimer::timeout, this, &GameServer::onGameTimeout);
     connect(m_socket, &QUdpSocket::readyRead, this, &GameServer::onReadyRead);
+    qDebug() << "Сервер инициализирован и готов к запуску на порту 12345.";
 }
 
 bool GameServer::start(quint16 port) {
     if (!m_socket->bind(QHostAddress::Any, port)) {
-        qDebug() << "Не удалось запустить сервер на порту" << port;
+        qDebug() << "Сервер не может запуститься на порту" << port << "— порт занят.";
         return false;
     }
-    qDebug() << "Сервер запущен на порту" << port;
+    quint16 actualPort = m_socket->localPort();
+    qDebug() << "Сервер успешно запущен на порту" << actualPort;
     return true;
 }
 
@@ -31,22 +33,19 @@ void GameServer::onReadyRead() {
 
         m_socket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
         
-        qDebug() << "Получены данные:" << datagram;
+        qDebug() << "[onReadyRead] Получены данные:" << datagram;
         
         QJsonDocument doc = QJsonDocument::fromJson(datagram);
         if (doc.isNull()) {
-            qDebug() << "Ошибка при разборе JSON";
+            qDebug() << "[onReadyRead] Ошибка при разборе JSON";
             continue;
         }
         
         QJsonObject json = doc.object();
         QString type = json["type"].toString();
-        qDebug() << "Тип сообщения:" << type;
+        qDebug() << "[onReadyRead] Тип сообщения:" << type;
         
-        if (type == "ping") {
-            handlePing(sender, senderPort, json);
-        }
-        else if (type == "login") {
+        if (type == "login") {
             handleLogin(sender, senderPort, json);
         }
         else if (type == "find_game") {
@@ -65,328 +64,402 @@ void GameServer::onReadyRead() {
             handleChat(sender, senderPort, json);
         }
         else {
-            qDebug() << "Неизвестный тип сообщения:" << type;
+            qDebug() << "[onReadyRead] Неизвестный тип сообщения:" << type;
         }
-    }
-}
-
-void GameServer::handlePing(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json) {
-    QString username = json["username"].toString();
-    if (m_players.contains(username)) {
-        Player* player = m_players[username];
-        player->address = sender;
-        player->port = senderPort;
-        player->missedPings = 0;
-        
-        // Отправляем pong
-        QJsonObject response;
-        response["type"] = "pong";
-        sendJson(response, sender, senderPort);
     }
 }
 
 void GameServer::handleLogin(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json) {
     QString username = json["username"].toString();
-    
+    qDebug() << "[handleLogin] Попытка входа пользователя:" << username << sender << senderPort;
     if (m_players.contains(username)) {
+        qDebug() << "[handleLogin] Имя уже занято:" << username;
         QJsonObject response;
         response["type"] = "login_response";
         response["success"] = false;
-        response["message"] = "Имя пользователя уже занято";
-        sendJson(response, sender, senderPort);
+        response["message"] = "Игрок уже существует";
+        sendJson(sender, senderPort, response);
         return;
     }
-
+    
+    // Создаем нового игрока
     Player* player = new Player;
     player->username = username;
     player->address = sender;
     player->port = senderPort;
+    player->boardReceived = false;
     player->isReady = false;
-    player->missedPings = 0;
     
-    player->pingTimer = new QTimer(this);
-    player->pingTimer->setInterval(5000); // Проверка каждые 5 секунд
-    connect(player->pingTimer, &QTimer::timeout, this, [this, player]() {
-        onPingTimeout(player);
-    });
-    player->pingTimer->start();
-
     m_players[username] = player;
-
+    
+    // Отправляем ответ
     QJsonObject response;
     response["type"] = "login_response";
     response["success"] = true;
-    sendJson(response, sender, senderPort);
+    response["message"] = "Успешный вход";
+    sendJson(sender, senderPort, response);
+    qDebug() << "[handleLogin] Успешный вход пользователя:" << username;
+    qDebug() << "КЛИЕНТ ПОДКЛЮЧИЛСЯ:" << username << sender.toString() << ":" << senderPort;
 }
 
 void GameServer::handleFindGame(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json) {
     QString username = json["username"].toString();
+    qDebug() << "[handleFindGame] Запрос на поиск игры от:" << username;
     if (!m_players.contains(username)) {
-        return;
-    }
-
-    Player* player = m_players[username];
-    player->address = sender;
-    player->port = senderPort;
-
-    // Ищем свободного игрока
-    QString opponent;
-    for (auto it = m_players.begin(); it != m_players.end(); ++it) {
-        if (it.key() != username && !m_gamePairs.contains(it.key())) {
-            opponent = it.key();
-            break;
-        }
-    }
-
-    if (opponent.isEmpty()) {
+        qDebug() << "[handleFindGame] Игрок не найден:" << username;
         QJsonObject response;
-        response["type"] = "waiting";
-        sendJson(response, sender, senderPort);
+        response["type"] = "find_game_response";
+        response["success"] = false;
+        response["message"] = "Игрок не найден";
+        sendJson(sender, senderPort, response);
         return;
     }
+    Player* player = m_players[username];
+    if (m_gamePairs.contains(username)) {
+        qDebug() << "[handleFindGame] Игрок уже в игре:" << username;
+        QJsonObject response;
+        response["type"] = "find_game_response";
+        response["success"] = false;
+        response["message"] = "Игрок уже в игре";
+        sendJson(sender, senderPort, response);
+        return;
+    }
+    m_waitingQueue.append(username);
+    qDebug() << "[handleFindGame] Игрок добавлен в очередь ожидания:" << username;
+    QJsonObject response;
+    response["type"] = "find_game_response";
+    response["success"] = true;
+    response["message"] = "Поиск игры начат";
+    sendJson(sender, senderPort, response);
+    processWaitingQueue();
+}
 
-    startGame(username, opponent);
+void GameServer::processWaitingQueue() {
+    qDebug() << "[processWaitingQueue] Размер очереди:" << m_waitingQueue.size();
+    while (m_waitingQueue.size() >= 2) {
+        QString player1 = m_waitingQueue.takeFirst();
+        QString player2 = m_waitingQueue.takeFirst();
+        m_gamePairs[player1] = player2;
+        m_gamePairs[player2] = player1;
+        qDebug() << "[processWaitingQueue] Пара создана:" << player1 << "и" << player2;
+        QJsonObject gameFound;
+        gameFound["type"] = "game_found";
+        gameFound["opponent"] = player2;
+        sendJson(m_players[player1]->address, m_players[player1]->port, gameFound);
+        gameFound["opponent"] = player1;
+        sendJson(m_players[player2]->address, m_players[player2]->port, gameFound);
+    }
 }
 
 void GameServer::handleBoard(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json) {
     QString username = json["username"].toString();
+    qDebug() << "[handleBoard] Получена доска от:" << username;
+    QJsonArray boardArray = json["board"].toArray();
     if (!m_players.contains(username)) {
+        qDebug() << "[handleBoard] Игрок не найден:" << username;
+        QJsonObject response;
+        response["type"] = "board_response";
+        response["success"] = false;
+        response["message"] = "Игрок не найден";
+        sendJson(sender, senderPort, response);
         return;
     }
-
+    if (boardArray.size() != BOARD_SIZE) {
+        qDebug() << "[handleBoard] Некорректный размер доски:" << boardArray.size();
+        QJsonObject response;
+        response["type"] = "board_response";
+        response["success"] = false;
+        response["message"] = "Некорректный размер доски";
+        sendJson(sender, senderPort, response);
+        return;
+    }
     Player* player = m_players[username];
-    player->address = sender;
-    player->port = senderPort;
-
-    QJsonArray boardArray = json["board"].toArray();
-    player->board.clear();
-    for (const QJsonValue& rowValue : boardArray) {
-        QVector<int> row;
-        QJsonArray rowArray = rowValue.toArray();
-        for (const QJsonValue& cellValue : rowArray) {
-            row.append(cellValue.toInt());
+    QVector<QVector<int>> board;
+    for (int i = 0; i < boardArray.size(); ++i) {
+        QJsonArray row = boardArray[i].toArray();
+        if (row.size() != BOARD_SIZE) {
+            qDebug() << "[handleBoard] Некорректный размер строки доски:" << row.size();
+            QJsonObject response;
+            response["type"] = "board_response";
+            response["success"] = false;
+            response["message"] = "Некорректный размер строки доски";
+            sendJson(sender, senderPort, response);
+            return;
         }
-        player->board.append(row);
+        QVector<int> boardRow;
+        for (int j = 0; j < row.size(); ++j) {
+            boardRow.append(row[j].toInt());
+        }
+        board.append(boardRow);
     }
-
-    player->isReady = true;
-
-    // Проверяем, готовы ли оба игрока
-    QString opponent = m_gamePairs[username];
-    if (m_players[opponent]->isReady) {
-        QJsonObject response1;
-        response1["type"] = "game_start";
-        response1["opponent"] = opponent;
-        sendJson(response1, player->address, player->port);
-
-        QJsonObject response2;
-        response2["type"] = "game_start";
-        response2["opponent"] = username;
-        sendJson(response2, m_players[opponent]->address, m_players[opponent]->port);
-
-        m_gameTimer->start();
+    if (!checkBoard(board)) {
+        qDebug() << "[handleBoard] Некорректная доска (валидация не пройдена)";
+        QJsonObject response;
+        response["type"] = "board_response";
+        response["success"] = false;
+        response["message"] = "Некорректная доска";
+        sendJson(sender, senderPort, response);
+        return;
     }
+    player->board = board;
+    player->boardReceived = true;
+    qDebug() << "[handleBoard] Доска успешно принята от:" << username;
+    QJsonObject response;
+    response["type"] = "board_response";
+    response["success"] = true;
+    response["message"] = "Доска принята";
+    sendJson(sender, senderPort, response);
+    if (m_gamePairs.contains(username)) {
+        tryStartGame(username);
+    }
+}
+
+bool GameServer::checkBoard(const QVector<QVector<int>>& board) {
+    if (board.size() != BOARD_SIZE) return false;
+    for (const auto& row : board) {
+        if (row.size() != BOARD_SIZE) return false;
+        for (int cell : row) {
+            if (cell != 0 && cell != 1) return false;
+        }
+    }
+    return true;
 }
 
 void GameServer::handleShot(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json) {
     QString username = json["username"].toString();
+    qDebug() << "[handleShot] Выстрел от:" << username;
     if (!m_players.contains(username) || !m_gamePairs.contains(username)) {
+        qDebug() << "[handleShot] Игрок не найден или не в игре:" << username;
+        QJsonObject response;
+        response["type"] = "shot_response";
+        response["success"] = false;
+        response["message"] = "Игрок не найден или не в игре";
+        sendJson(sender, senderPort, response);
         return;
     }
-
     Player* player = m_players[username];
     player->address = sender;
     player->port = senderPort;
-
     QString opponent = m_gamePairs[username];
     int x = json["x"].toInt();
     int y = json["y"].toInt();
-
-    bool hit = false;
-    if (x >= 0 && x < 10 && y >= 0 && y < 10) {
-        hit = m_players[opponent]->board[y][x] == 1;
-        if (hit) {
-            m_players[opponent]->board[y][x] = 2; // Помечаем как подбитый
+    qDebug() << "[handleShot] Координаты:" << x << y;
+    if (x < 0 || x >= BOARD_SIZE || y < 0 || y >= BOARD_SIZE) {
+        qDebug() << "[handleShot] Некорректные координаты:" << x << y;
+        QJsonObject response;
+        response["type"] = "shot_response";
+        response["success"] = false;
+        response["message"] = "Некорректные координаты";
+        sendJson(sender, senderPort, response);
+        return;
+    }
+    bool hit = m_players[opponent]->board[y][x] == 1;
+    bool sunk = false;
+    if (hit) {
+        m_players[opponent]->board[y][x] = 2;
+        sunk = checkShipSunk(m_players[opponent]->board, x, y);
+        if (sunk && areAllShipsSunk(m_players[opponent]->board)) {
+            qDebug() << "[handleShot] Победа игрока:" << username;
+            handleGameOver(username, opponent);
+            return;
         }
     }
+    m_gameTimer->stop();
+    m_gameTimer->start();
+    QJsonObject shotResult;
+    shotResult["type"] = "shot_result";
+    shotResult["hit"] = hit;
+    shotResult["sunk"] = sunk;
+    sendJson(sender, senderPort, shotResult);
+    QJsonObject opponentNotification;
+    opponentNotification["type"] = "opponent_shot";
+    opponentNotification["x"] = x;
+    opponentNotification["y"] = y;
+    opponentNotification["hit"] = hit;
+    opponentNotification["sunk"] = sunk;
+    sendJson(m_players[opponent]->address, m_players[opponent]->port, opponentNotification);
+}
 
-    QJsonObject response;
-    response["type"] = "shot_result";
-    response["x"] = x;
-    response["y"] = y;
-    response["hit"] = hit;
-    sendJson(response, player->address, player->port);
+bool GameServer::checkShipSunk(const QVector<QVector<int>>& board, int x, int y) {
+    // Проверяем все клетки корабля
+    QVector<QPoint> shipCells;
+    QVector<QPoint> toCheck;
+    toCheck.append(QPoint(x, y));
 
-    // Проверяем победу
-    bool gameOver = true;
-    for (const auto& row : m_players[opponent]->board) {
-        for (int cell : row) {
-            if (cell == 1) { // Если остались неподбитые корабли
-                gameOver = false;
-                break;
+    while (!toCheck.isEmpty()) {
+        QPoint current = toCheck.takeFirst();
+        if (shipCells.contains(current)) {
+            continue;
+        }
+
+        if (board[current.y()][current.x()] == 1 || board[current.y()][current.x()] == 2) {
+            shipCells.append(current);
+
+            // Проверяем соседние клетки
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    if (dx == 0 && dy == 0) continue;
+                    if (dx != 0 && dy != 0) continue; // Только горизонтально и вертикально
+
+                    int newX = current.x() + dx;
+                    int newY = current.y() + dy;
+
+                    if (newX >= 0 && newX < 10 && newY >= 0 && newY < 10) {
+                        toCheck.append(QPoint(newX, newY));
+                    }
+                }
             }
         }
-        if (!gameOver) break;
     }
 
-    if (gameOver) {
-        QJsonObject gameOver1;
-        gameOver1["type"] = "game_over";
-        gameOver1["winner"] = username;
-        sendJson(gameOver1, player->address, player->port);
-
-        QJsonObject gameOver2;
-        gameOver2["type"] = "game_over";
-        gameOver2["winner"] = username;
-        sendJson(gameOver2, m_players[opponent]->address, m_players[opponent]->port);
-
-        m_gamePairs.remove(username);
-        m_gamePairs.remove(opponent);
-        m_gameTimer->stop();
+    // Проверяем, все ли клетки корабля поражены
+    for (const QPoint& cell : shipCells) {
+        if (board[cell.y()][cell.x()] != 2) {
+            return false;
+        }
     }
+
+    return !shipCells.isEmpty();
+}
+
+bool GameServer::areAllShipsSunk(const QVector<QVector<int>>& board) {
+    for (int i = 0; i < BOARD_SIZE; ++i) {
+        for (int j = 0; j < BOARD_SIZE; ++j) {
+            if (board[i][j] == 1) { // Если остались неподбитые корабли
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void GameServer::handleGameOver(const QString& winner, const QString& loser) {
+    qDebug() << "[handleGameOver] Победитель:" << winner << "Проигравший:" << loser;
+    QJsonObject winnerNotification;
+    winnerNotification["type"] = "game_over";
+    winnerNotification["result"] = "win";
+    sendJson(m_players[winner]->address, m_players[winner]->port, winnerNotification);
+    QJsonObject loserNotification;
+    loserNotification["type"] = "game_over";
+    loserNotification["result"] = "lose";
+    sendJson(m_players[loser]->address, m_players[loser]->port, loserNotification);
+    m_gamePairs.remove(winner);
+    m_gamePairs.remove(loser);
+    m_gameTimer->stop();
 }
 
 void GameServer::handleReady(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json) {
     QString username = json["username"].toString();
+    qDebug() << "[handleReady] Готовность от игрока:" << username;
     if (!m_players.contains(username)) {
+        qDebug() << "[handleReady] Игрок не найден:" << username;
+        QJsonObject response;
+        response["type"] = "ready_response";
+        response["success"] = false;
+        response["message"] = "Игрок не найден";
+        sendJson(sender, senderPort, response);
         return;
     }
-
     Player* player = m_players[username];
-    player->address = sender;
-    player->port = senderPort;
     player->isReady = true;
-
+    QJsonObject response;
+    response["type"] = "ready_response";
+    response["success"] = true;
+    response["message"] = "Готовность подтверждена";
+    sendJson(sender, senderPort, response);
     if (m_gamePairs.contains(username)) {
-        QString opponent = m_gamePairs[username];
-        if (m_players[opponent]->isReady) {
-            QJsonObject response1;
-            response1["type"] = "game_start";
-            response1["opponent"] = opponent;
-            sendJson(response1, player->address, player->port);
-
-            QJsonObject response2;
-            response2["type"] = "game_start";
-            response2["opponent"] = username;
-            sendJson(response2, m_players[opponent]->address, m_players[opponent]->port);
-
-            m_gameTimer->start();
-        }
+        tryStartGame(username);
     }
 }
 
-void GameServer::handleChat(const QHostAddress &sender, quint16 senderPort, const QJsonObject &json) {
+void GameServer::handleChat(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json) {
     QString username = json["username"].toString();
+    qDebug() << "[handleChat] Сообщение от игрока:" << username;
     QString message = json["message"].toString();
-    
-    // Находим игрока
-    auto it = std::find_if(m_players.begin(), m_players.end(),
-        [&](const Player &p) { return p.username == username; });
-    
-    if (it != m_players.end()) {
-        // Находим игру, в которой участвует игрок
-        auto gameIt = std::find_if(m_games.begin(), m_games.end(),
-            [&](const Game &g) { return g.player1 == username || g.player2 == username; });
-        
-        if (gameIt != m_games.end()) {
-            // Отправляем сообщение обоим игрокам
-            QString opponent = (gameIt->player1 == username) ? gameIt->player2 : gameIt->player1;
-            auto opponentIt = std::find_if(m_players.begin(), m_players.end(),
-                [&](const Player &p) { return p.username == opponent; });
-            
-            if (opponentIt != m_players.end()) {
-                QJsonObject chatJson;
-                chatJson["type"] = "chat";
-                chatJson["username"] = username;
-                chatJson["message"] = message;
-                
-                // Отправляем сообщение отправителю
-                sendJson(sender, senderPort, chatJson);
-                
-                // Отправляем сообщение получателю
-                sendJson(opponentIt->address, opponentIt->port, chatJson);
-            }
-        }
+    if (!m_players.contains(username) || !m_gamePairs.contains(username)) {
+        qDebug() << "[handleChat] Игрок не найден или не в игре:" << username;
+        return;
     }
-}
-
-void GameServer::onPingTimeout(Player* player) {
-    player->missedPings++;
-    if (player->missedPings >= 3) { // Если пропущено 3 пинга подряд
-        removePlayer(player->username);
-    }
+    Player* player = m_players[username];
+    QString opponent = m_gamePairs[username];
+    Player* opponentPlayer = m_players[opponent];
+    QJsonObject chatJson;
+    chatJson["type"] = "chat";
+    chatJson["username"] = username;
+    chatJson["message"] = message;
+    sendJson(sender, senderPort, chatJson);
+    sendJson(opponentPlayer->address, opponentPlayer->port, chatJson);
 }
 
 void GameServer::onGameTimeout() {
+    qDebug() << "[onGameTimeout] Сработал таймер игры";
     checkGameTimeout();
 }
 
 void GameServer::checkGameTimeout() {
+    qDebug() << "[checkGameTimeout] Проверка на таймаут игры";
     for (auto it = m_gamePairs.begin(); it != m_gamePairs.end();) {
         QString player1 = it.key();
         QString player2 = it.value();
-        
         if (!m_players.contains(player1) || !m_players.contains(player2)) {
             it = m_gamePairs.erase(it);
             continue;
         }
-
-        QJsonObject timeout1;
-        timeout1["type"] = "game_over";
-        timeout1["winner"] = "timeout";
-        sendJson(timeout1, m_players[player1]->address, m_players[player1]->port);
-
-        QJsonObject timeout2;
-        timeout2["type"] = "game_over";
-        timeout2["winner"] = "timeout";
-        sendJson(timeout2, m_players[player2]->address, m_players[player2]->port);
-
-        it = m_gamePairs.erase(it);
+        if (!m_players[player1]->isReady || !m_players[player2]->isReady) {
+            qDebug() << "[checkGameTimeout] Игра отменена по таймауту между:" << player1 << player2;
+            QJsonObject timeout1;
+            timeout1["type"] = "game_timeout";
+            timeout1["message"] = "Игра отменена из-за таймаута";
+            sendJson(m_players[player1]->address, m_players[player1]->port, timeout1);
+            QJsonObject timeout2;
+            timeout2["type"] = "game_timeout";
+            timeout2["message"] = "Игра отменена из-за таймаута";
+            sendJson(m_players[player2]->address, m_players[player2]->port, timeout2);
+            it = m_gamePairs.erase(it);
+            continue;
+        }
+        ++it;
     }
 }
 
-void GameServer::startGame(const QString& player1, const QString& player2) {
-    m_gamePairs[player1] = player2;
-    m_gamePairs[player2] = player1;
-
-    QJsonObject response1;
-    response1["type"] = "game_start";
-    response1["opponent"] = player2;
-    sendJson(response1, m_players[player1]->address, m_players[player1]->port);
-
-    QJsonObject response2;
-    response2["type"] = "game_start";
-    response2["opponent"] = player1;
-    sendJson(response2, m_players[player2]->address, m_players[player2]->port);
+void GameServer::tryStartGame(const QString& username) {
+    QString opponent = m_gamePairs[username];
+    Player* player1 = m_players[username];
+    Player* player2 = m_players[opponent];
+    qDebug() << "[tryStartGame] Проверка старта игры для пары:" << username << opponent;
+    if (player1->boardReceived && player2->boardReceived && player1->isReady && player2->isReady) {
+        QJsonObject gameStart;
+        gameStart["type"] = "game_start";
+        gameStart["opponent"] = opponent;
+        sendJson(player1->address, player1->port, gameStart);
+        gameStart["opponent"] = username;
+        sendJson(player2->address, player2->port, gameStart);
+        m_gameTimer->start();
+        qDebug() << "[tryStartGame] Игра началась между" << username << "и" << opponent;
+    }
 }
 
 void GameServer::removePlayer(const QString& username) {
-    if (m_players.contains(username)) {
-        Player* player = m_players[username];
-        if (player->pingTimer) {
-            player->pingTimer->stop();
-            delete player->pingTimer;
-        }
-        delete player;
-        m_players.remove(username);
-
-        if (m_gamePairs.contains(username)) {
-            QString opponent = m_gamePairs[username];
-            m_gamePairs.remove(username);
-            m_gamePairs.remove(opponent);
-
-            if (m_players.contains(opponent)) {
-                QJsonObject response;
-                response["type"] = "game_over";
-                response["winner"] = "disconnect";
-                sendJson(response, m_players[opponent]->address, m_players[opponent]->port);
-            }
-        }
+    qDebug() << "[removePlayer] Удаление игрока:" << username;
+    if (!m_players.contains(username)) {
+        return;
     }
+    if (m_gamePairs.contains(username)) {
+        QString opponent = m_gamePairs[username];
+        if (m_players.contains(opponent)) {
+            QJsonObject response;
+            response["type"] = "opponent_disconnected";
+            response["message"] = "Противник отключился";
+            sendJson(m_players[opponent]->address, m_players[opponent]->port, response);
+        }
+        m_gamePairs.remove(username);
+        m_gamePairs.remove(opponent);
+    }
+    delete m_players[username];
+    m_players.remove(username);
 }
 
-void GameServer::sendJson(const QJsonObject& json, const QHostAddress& address, quint16 port) {
-    QJsonDocument doc(json);
-    QByteArray data = doc.toJson();
+void GameServer::sendJson(const QHostAddress& address, quint16 port, const QJsonObject& json) {
+    QByteArray data = QJsonDocument(json).toJson();
     m_socket->writeDatagram(data, address, port);
 } 

@@ -201,13 +201,23 @@ void NetworkClient::onReadyRead() {
     QString type = response["type"].toString();
     qDebug() << "Получено сообщение типа:" << type;
     
-    if (type == "game_start") {
+    if (type == "game_found") {
+        QString opponent = response["opponent"].toString();
+        qDebug() << "game_found: получено сообщение game_found";
+        qDebug() << "game_found: opponent=" << opponent;
+        emit gameFound(opponent);
+        emit waitingForOpponent();
+    }
+    else if (type == "game_start") {
         QString opponent = response["opponent"].toString();
         bool waitingForReady = response["waiting_for_ready"].toBool();
         qDebug() << "game_start: opponent=" << opponent << "waitingForReady=" << waitingForReady;
         emit gameFound(opponent);
         if (waitingForReady) {
+            sendReady();
             emit waitingForOpponent();
+        } else {
+            emit gameStartConfirmed();
         }
     }
     else if (type == "turn_change") {
@@ -282,4 +292,12 @@ void NetworkClient::sendJson(const QJsonObject &json) {
     QByteArray data = doc.toJson();
     qDebug() << "Отправка данных:" << data;
     m_socket->writeDatagram(data, m_serverAddress, m_port);
+}
+
+void NetworkClient::sendShipSunkMessage(int x, int y) {
+    QJsonObject json;
+    json["type"] = "ship_sunk";
+    json["x"] = x;
+    json["y"] = y;
+    sendJson(json);
 } 

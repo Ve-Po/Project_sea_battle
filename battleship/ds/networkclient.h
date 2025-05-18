@@ -7,6 +7,7 @@
 #include <QString>
 #include <QVector>
 #include <QHostAddress>
+#include <QJsonObject>
 
 class NetworkClient : public QObject {
     Q_OBJECT
@@ -21,6 +22,7 @@ public:
     void sendBoard(const QVector<QVector<int>> &board);
     void sendChatMessage(const QString &message);
     void sendShotResult(int x, int y, bool hit);
+    void sendShipSunkMessage(int x, int y);
     QString username() const { return m_username; }
 
 signals:
@@ -36,6 +38,7 @@ signals:
     void opponentReady();
     void shotReceived(int x, int y);
     void turnChanged(bool yourTurn);
+    void gameStartConfirmed();
 
 private slots:
     void onReadyRead();

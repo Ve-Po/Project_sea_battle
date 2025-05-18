@@ -10,12 +10,16 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QDebug>
+#include <QQueue>
+#include <QVector>
+#include <QPoint>
 
 struct Player {
     QString username;
     QHostAddress address;
     quint16 port;
     bool isReady;
+    bool boardReceived;
     QVector<QVector<int>> board;
     QTimer* pingTimer;
     int missedPings;
@@ -30,13 +34,18 @@ public:
 
 private slots:
     void onReadyRead();
-    void onPingTimeout(Player* player);
-    void onGameTimeout(Game* game);
+    void onGameTimeout();
 
 private:
+    static const int PING_INTERVAL = 5000;  // 5 секунд
+    static const int MAX_MISSED_PINGS = 3;
+    static const int GAME_TIMEOUT = 300000;  // 5 минут
+    static const int BOARD_SIZE = 10;        // Размер игрового поля
+
     QUdpSocket* m_socket;
     QMap<QString, Player*> m_players;
     QMap<QString, QString> m_gamePairs;
+    QQueue<QString> m_waitingQueue;
     QTimer* m_gameTimer;
     
     void handlePing(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json);
@@ -48,9 +57,14 @@ private:
     void handleChat(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json);
     void sendJson(const QHostAddress& address, quint16 port, const QJsonObject& json);
     void startGame(const QString& player1, const QString& player2);
-    void checkGameOver(Game* game);
+    void checkGameTimeout();
     bool checkBoard(const QVector<QVector<int>>& board);
-    void removeGame(Game* game);
+    void removePlayer(const QString& username);
+    void processWaitingQueue();
+    void tryStartGame(const QString& username);
+    bool checkShipSunk(const QVector<QVector<int>>& board, int x, int y);
+    bool areAllShipsSunk(const QVector<QVector<int>>& board);
+    void handleGameOver(const QString& winner, const QString& loser);
 };
 
 #endif // GAMESERVER_H 

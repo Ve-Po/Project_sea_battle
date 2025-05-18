@@ -7,7 +7,11 @@ CONFIG -= app_bundle
 TEMPLATE = app
 
 SOURCES += \
-    server.cpp
+    server.cpp \
+    gameserver.cpp
+
+HEADERS += \
+    gameserver.h
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

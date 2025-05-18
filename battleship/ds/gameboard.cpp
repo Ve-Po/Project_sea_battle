@@ -17,9 +17,14 @@ void GameBoard::reset()
     m_board.resize(GRID_SIZE);
     for (auto &row : m_board) {
         row.resize(GRID_SIZE);
-        row.fill(EMPTY);
+        row.fill(CellState::EMPTY);
     }
     update();
+}
+
+void GameBoard::clear()
+{
+    reset();
 }
 
 void GameBoard::setPlacementMode(bool enabled)
@@ -35,22 +40,23 @@ bool GameBoard::placeShip(const QPoint& bow, ShipSize size, bool horizontal)
 
     int shipSize = static_cast<int>(size);
     if (horizontal) {
-        for (int y = bow.y(); y < bow.y() + shipSize; ++y) {
-            m_board[bow.x()][y] = SHIP;
+        for (int x = bow.x(); x < bow.x() + shipSize; ++x) {
+            m_board[bow.y()][x] = CellState::SHIP;
         }
     } else {
-        for (int x = bow.x(); x < bow.x() + shipSize; ++x) {
-            m_board[x][bow.y()] = SHIP;
+        for (int y = bow.y(); y < bow.y() + shipSize; ++y) {
+            m_board[y][bow.x()] = CellState::SHIP;
         }
     }
     update();
     return true;
 }
 
-bool GameBoard::canPlaceShip(const QPoint& bow, ShipSize size, bool horizontal) const {
+bool GameBoard::canPlaceShip(const QPoint& bow, ShipSize size, bool horizontal) const
+{
     const int shipSize = static_cast<int>(size);
-    const int endX = horizontal ? bow.x() : bow.x() + shipSize - 1;
-    const int endY = horizontal ? bow.y() + shipSize - 1 : bow.y();
+    const int endX = horizontal ? bow.x() + shipSize - 1 : bow.x();
+    const int endY = horizontal ? bow.y() : bow.y() + shipSize - 1;
 
     // Проверка границ
     if (bow.x() < 0 || bow.y() < 0 || endX >= GRID_SIZE || endY >= GRID_SIZE) {
@@ -58,13 +64,13 @@ bool GameBoard::canPlaceShip(const QPoint& bow, ShipSize size, bool horizontal) 
     }
 
     // Проверка области вокруг корабля
-    for (int x = qMax(0, bow.x()-1); x <= qMin(GRID_SIZE-1, endX+1); ++x) {
-        for (int y = qMax(0, bow.y()-1); y <= qMin(GRID_SIZE-1, endY+1); ++y) {
-            if (m_board[x][y] == SHIP) {
+    for (int y = qMax(0, bow.y()-1); y <= qMin(GRID_SIZE-1, endY+1); ++y) {
+        for (int x = qMax(0, bow.x()-1); x <= qMin(GRID_SIZE-1, endX+1); ++x) {
+            if (m_board[y][x] == CellState::SHIP) {
                 // Проверяем, не является ли это частью нашего корабля
                 bool isOurShip = horizontal
-                                     ? (x == bow.x() && y >= bow.y() && y <= endY)
-                                     : (y == bow.y() && x >= bow.x() && x <= endX);
+                    ? (y == bow.y() && x >= bow.x() && x <= endX)
+                    : (x == bow.x() && y >= bow.y() && y <= endY);
 
                 if (!isOurShip) {
                     return false;
@@ -72,6 +78,22 @@ bool GameBoard::canPlaceShip(const QPoint& bow, ShipSize size, bool horizontal) 
             }
         }
     }
+
+    // Проверяем, что все клетки под кораблем пустые
+    if (horizontal) {
+        for (int x = bow.x(); x <= endX; ++x) {
+            if (m_board[bow.y()][x] != CellState::EMPTY) {
+                return false;
+            }
+        }
+    } else {
+        for (int y = bow.y(); y <= endY; ++y) {
+            if (m_board[y][bow.x()] != CellState::EMPTY) {
+                return false;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -79,9 +101,9 @@ GameBoard::CellState GameBoard::checkShot(const QPoint& position) const
 {
     if (position.x() < 0 || position.x() >= GRID_SIZE ||
         position.y() < 0 || position.y() >= GRID_SIZE)
-        return EMPTY;
+        return CellState::EMPTY;
 
-    return m_board[position.x()][position.y()];
+    return m_board[position.y()][position.x()];
 }
 
 void GameBoard::markShot(const QPoint& position, CellState result)
@@ -90,17 +112,22 @@ void GameBoard::markShot(const QPoint& position, CellState result)
         position.y() < 0 || position.y() >= GRID_SIZE)
         return;
 
-    if (result == HIT) {
-        m_board[position.x()][position.y()] = HIT;
-        
-        // Проверяем, не потоплен ли корабль
+    // Проверяем, что клетка еще не была обстреляна
+    if (m_board[position.y()][position.x()] == CellState::HIT ||
+        m_board[position.y()][position.x()] == CellState::MISS) {
+        return;
+    }
+
+    if (result == CellState::HIT) {
+        m_board[position.y()][position.x()] = CellState::HIT;
+        // Если весь корабль подбит — потопить его
         if (isShipSunk(position)) {
             markSunk(position);
         }
-    } else if (result == MISS) {
-        m_board[position.x()][position.y()] = MISS;
     }
-
+    else if (result == CellState::MISS) {
+        m_board[position.y()][position.x()] = CellState::MISS;
+    }
     update();
 }
 
@@ -108,7 +135,7 @@ bool GameBoard::allShipsSunk() const
 {
     for (const auto &row : m_board) {
         for (auto cell : row) {
-            if (cell == SHIP) return false;
+            if (cell == CellState::SHIP) return false;
         }
     }
     return true;
@@ -131,8 +158,8 @@ bool GameBoard::placeRandomShips(int maxTotalAttempts)
 
         while (!placed && attempts++ < maxTotalAttempts && shipAttempts++ < 50) {
             bool horizontal = QRandomGenerator::global()->bounded(2) == 0;
-            int x = QRandomGenerator::global()->bounded(GRID_SIZE - (horizontal ? 0 : static_cast<int>(size)));
-            int y = QRandomGenerator::global()->bounded(GRID_SIZE - (horizontal ? static_cast<int>(size) : 0));
+            int x = QRandomGenerator::global()->bounded(GRID_SIZE - (horizontal ? static_cast<int>(size) : 0));
+            int y = QRandomGenerator::global()->bounded(GRID_SIZE - (horizontal ? 0 : static_cast<int>(size)));
 
             placed = placeShip(QPoint(x, y), size, horizontal);
         }
@@ -154,44 +181,44 @@ bool GameBoard::isValidShipPlacement() const
 
     QVector<QVector<bool>> visited(GRID_SIZE, QVector<bool>(GRID_SIZE, false));
 
-    for (int x = 0; x < GRID_SIZE; ++x) {
-        for (int y = 0; y < GRID_SIZE; ++y) {
-            if (m_board[x][y] == SHIP && !visited[x][y]) {
+    for (int y = 0; y < GRID_SIZE; ++y) {
+        for (int x = 0; x < GRID_SIZE; ++x) {
+            if (m_board[y][x] == CellState::SHIP && !visited[y][x]) {
                 // Нашли начало корабля
                 int size = 1;
                 bool isHorizontal = true;
 
                 // Определяем направление корабля
-                if (y < GRID_SIZE-1 && m_board[x][y+1] == SHIP) {
+                if (x < GRID_SIZE-1 && m_board[y][x+1] == CellState::SHIP) {
                     // Горизонтальный корабль
                     isHorizontal = true;
-                    while (y+size < GRID_SIZE && m_board[x][y+size] == SHIP) {
-                        visited[x][y+size] = true;
+                    while (x+size < GRID_SIZE && m_board[y][x+size] == CellState::SHIP) {
+                        visited[y][x+size] = true;
                         size++;
                     }
                 } else {
                     // Вертикальный корабль
                     isHorizontal = false;
-                    while (x+size < GRID_SIZE && m_board[x+size][y] == SHIP) {
-                        visited[x+size][y] = true;
+                    while (y+size < GRID_SIZE && m_board[y+size][x] == CellState::SHIP) {
+                        visited[y+size][x] = true;
                         size++;
                     }
                 }
 
                 // Проверяем окружение корабля
                 int startX = qMax(0, x - 1);
-                int endX = qMin(GRID_SIZE-1, isHorizontal ? x + 1 : x + size);
+                int endX = qMin(GRID_SIZE-1, isHorizontal ? x + size : x + 1);
                 int startY = qMax(0, y - 1);
-                int endY = qMin(GRID_SIZE-1, isHorizontal ? y + size : y + 1);
+                int endY = qMin(GRID_SIZE-1, isHorizontal ? y + 1 : y + size);
 
                 for (int i = startX; i <= endX; ++i) {
                     for (int j = startY; j <= endY; ++j) {
                         // Пропускаем клетки самого корабля
                         bool isShipCell = isHorizontal
-                                              ? (i == x && j >= y && j < y + size)
-                                              : (j == y && i >= x && i < x + size);
+                            ? (j == y && i >= x && i < x + size)
+                            : (i == x && j >= y && j < y + size);
 
-                        if (!isShipCell && m_board[i][j] == SHIP) {
+                        if (!isShipCell && m_board[j][i] == CellState::SHIP) {
                             return false; // Корабли слишком близко
                         }
                     }
@@ -206,7 +233,7 @@ bool GameBoard::isValidShipPlacement() const
                 default: return false; // Недопустимый размер
                 }
 
-                visited[x][y] = true;
+                visited[y][x] = true;
             }
         }
     }
@@ -241,29 +268,27 @@ void GameBoard::drawGrid(QPainter &painter)
 
 void GameBoard::drawCells(QPainter &painter)
 {
-    for (int x = 0; x < GRID_SIZE; ++x) {
-        for (int y = 0; y < GRID_SIZE; ++y) {
-            QRect rect = cellRect(x, y);
+    for (int y = 0; y < GRID_SIZE; ++y) {
+        for (int x = 0; x < GRID_SIZE; ++x) {
+            QRect rect = cellRect(y, x);
 
-            switch (m_board[x][y]) {
-            case SHIP:
+            switch (m_board[y][x]) {
+            case CellState::SHIP:
                 if (m_isPlayerBoard) {
-                    painter.fillRect(rect, QColor(100, 100, 200));
+                    painter.fillRect(rect, QColor(100, 100, 200)); // Синий цвет для кораблей игрока
                 }
                 break;
-            case HIT:
-                painter.fillRect(rect, QColor(255, 0, 0));
+            case CellState::HIT:
+                painter.fillRect(rect, QColor(255, 0, 0)); // Красный цвет для попадания
                 painter.drawLine(rect.topLeft(), rect.bottomRight());
                 painter.drawLine(rect.topRight(), rect.bottomLeft());
                 break;
-            case MISS:
-                painter.fillRect(rect, QColor(200, 200, 200));
+            case CellState::MISS:
+                painter.fillRect(rect, QColor(200, 200, 200)); // Серый цвет для промаха
                 painter.drawEllipse(rect.adjusted(5, 5, -5, -5));
                 break;
-            case SUNK:
-                painter.fillRect(rect, Qt::black);
-                painter.drawLine(rect.topLeft(), rect.bottomRight());
-                painter.drawLine(rect.topRight(), rect.bottomLeft());
+            case CellState::SUNK:
+                painter.fillRect(rect, Qt::black); // Черный цвет для потопленного корабля
                 break;
             default:
                 break;
@@ -282,59 +307,42 @@ QRect GameBoard::cellRect(int row, int col) const
 
 bool GameBoard::isShipSunk(const QPoint& position) const
 {
-    if (m_board[position.x()][position.y()] != HIT) return false;
+    if (m_board[position.y()][position.x()] != CellState::HIT) return false;
 
     // Находим все клетки корабля
     QVector<QPoint> shipCells;
-    
-    // Определяем направление корабля
-    bool isHorizontal = false;
-    if (position.y() < GRID_SIZE-1 && m_board[position.x()][position.y()+1] >= SHIP) {
-        isHorizontal = true;
-    } else if (position.x() < GRID_SIZE-1 && m_board[position.x()+1][position.y()] >= SHIP) {
-        isHorizontal = false;
-    }
+    shipCells.append(position);
 
-    // Собираем все клетки корабля
-    if (isHorizontal) {
-        // Ищем влево
-        for (int y = position.y(); y >= 0; --y) {
-            if (m_board[position.x()][y] >= SHIP) {
-                shipCells.append(QPoint(position.x(), y));
-            } else {
-                break;
-            }
-        }
-        // Ищем вправо
-        for (int y = position.y() + 1; y < GRID_SIZE; ++y) {
-            if (m_board[position.x()][y] >= SHIP) {
-                shipCells.append(QPoint(position.x(), y));
-            } else {
-                break;
-            }
-        }
-    } else {
-        // Ищем вверх
-        for (int x = position.x(); x >= 0; --x) {
-            if (m_board[x][position.y()] >= SHIP) {
-                shipCells.append(QPoint(x, position.y()));
-            } else {
-                break;
-            }
-        }
-        // Ищем вниз
-        for (int x = position.x() + 1; x < GRID_SIZE; ++x) {
-            if (m_board[x][position.y()] >= SHIP) {
-                shipCells.append(QPoint(x, position.y()));
+    // Проверяем все 4 направления
+    const QVector<QPair<int, int>> directions = {
+        {-1, 0}, // влево
+        {1, 0},  // вправо
+        {0, -1}, // вверх
+        {0, 1}   // вниз
+    };
+
+    // Проверяем каждое направление
+    for (const auto& dir : directions) {
+        int x = position.x() + dir.first;
+        int y = position.y() + dir.second;
+        
+        // Идем в этом направлении, пока находим клетки корабля
+        while (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
+            if (m_board[y][x] == CellState::SHIP || m_board[y][x] == CellState::HIT) {
+                shipCells.append(QPoint(x, y));
+                x += dir.first;
+                y += dir.second;
             } else {
                 break;
             }
         }
     }
 
-    // Проверяем, все ли клетки корабля поражены
+    // Проверяем, все ли клетки корабля подбиты
     for (const QPoint &p : shipCells) {
-        if (m_board[p.x()][p.y()] == SHIP) return false;
+        if (m_board[p.y()][p.x()] != CellState::HIT) {
+            return false;
+        }
     }
 
     return true;
@@ -347,43 +355,49 @@ void GameBoard::markSunk(const QPoint& position)
     
     // Определяем направление корабля
     bool isHorizontal = false;
-    if (position.y() < GRID_SIZE-1 && m_board[position.x()][position.y()+1] >= SHIP) {
+    if (position.x() < GRID_SIZE-1 && (m_board[position.y()][position.x()+1] == CellState::SHIP || 
+                                      m_board[position.y()][position.x()+1] == CellState::HIT)) {
         isHorizontal = true;
-    } else if (position.x() < GRID_SIZE-1 && m_board[position.x()+1][position.y()] >= SHIP) {
+    } else if (position.y() < GRID_SIZE-1 && (m_board[position.y()+1][position.x()] == CellState::SHIP || 
+                                            m_board[position.y()+1][position.x()] == CellState::HIT)) {
         isHorizontal = false;
     }
 
     // Собираем все клетки корабля
     if (isHorizontal) {
         // Ищем влево
-        for (int y = position.y(); y >= 0; --y) {
-            if (m_board[position.x()][y] >= SHIP) {
-                shipCells.append(QPoint(position.x(), y));
+        for (int x = position.x(); x >= 0; --x) {
+            if (m_board[position.y()][x] == CellState::SHIP || 
+                m_board[position.y()][x] == CellState::HIT) {
+                shipCells.append(QPoint(x, position.y()));
             } else {
                 break;
             }
         }
         // Ищем вправо
-        for (int y = position.y() + 1; y < GRID_SIZE; ++y) {
-            if (m_board[position.x()][y] >= SHIP) {
-                shipCells.append(QPoint(position.x(), y));
+        for (int x = position.x() + 1; x < GRID_SIZE; ++x) {
+            if (m_board[position.y()][x] == CellState::SHIP || 
+                m_board[position.y()][x] == CellState::HIT) {
+                shipCells.append(QPoint(x, position.y()));
             } else {
                 break;
             }
         }
     } else {
         // Ищем вверх
-        for (int x = position.x(); x >= 0; --x) {
-            if (m_board[x][position.y()] >= SHIP) {
-                shipCells.append(QPoint(x, position.y()));
+        for (int y = position.y(); y >= 0; --y) {
+            if (m_board[y][position.x()] == CellState::SHIP || 
+                m_board[y][position.x()] == CellState::HIT) {
+                shipCells.append(QPoint(position.x(), y));
             } else {
                 break;
             }
         }
         // Ищем вниз
-        for (int x = position.x() + 1; x < GRID_SIZE; ++x) {
-            if (m_board[x][position.y()] >= SHIP) {
-                shipCells.append(QPoint(x, position.y()));
+        for (int y = position.y() + 1; y < GRID_SIZE; ++y) {
+            if (m_board[y][position.x()] == CellState::SHIP || 
+                m_board[y][position.x()] == CellState::HIT) {
+                shipCells.append(QPoint(position.x(), y));
             } else {
                 break;
             }
@@ -392,10 +406,32 @@ void GameBoard::markSunk(const QPoint& position)
 
     // Помечаем все клетки корабля как потопленные
     for (const QPoint &p : shipCells) {
-        m_board[p.x()][p.y()] = SUNK;
+        m_board[p.y()][p.x()] = CellState::SUNK;
     }
 
+    // Помечаем клетки вокруг потопленного корабля
+    markAroundSunkShip(shipCells);
+
     update();
+}
+
+void GameBoard::markAroundSunkShip(const QVector<QPoint>& shipCells)
+{
+    // Для каждой клетки корабля отмечаем вокруг неё клетки как MISS
+    for (const QPoint& p : shipCells) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int nx = p.x() + dx;
+                int ny = p.y() + dy;
+                if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
+                    // Не трогаем клетки самого корабля
+                    if (m_board[ny][nx] == CellState::EMPTY) {
+                        m_board[ny][nx] = CellState::MISS;
+                    }
+                }
+            }
+        }
+    }
 }
 
 void GameBoard::mousePressEvent(QMouseEvent *event)
@@ -406,7 +442,7 @@ void GameBoard::mousePressEvent(QMouseEvent *event)
         int col = (pos.x() - MARGIN) / CELL_SIZE;
 
         if (row >= 0 && row < GRID_SIZE && col >= 0 && col < GRID_SIZE) {
-            emit cellClicked(QPoint(row, col));
+            emit cellClicked(QPoint(col, row));
         }
     }
     QWidget::mousePressEvent(event);
@@ -414,53 +450,179 @@ void GameBoard::mousePressEvent(QMouseEvent *event)
 
 QVector<QVector<int>> GameBoard::getBoard() const {
     QVector<QVector<int>> result(GRID_SIZE, QVector<int>(GRID_SIZE));
-    for (int i = 0; i < GRID_SIZE; ++i) {
-        for (int j = 0; j < GRID_SIZE; ++j) {
-            result[i][j] = static_cast<int>(m_board[i][j]);
+    for (int y = 0; y < GRID_SIZE; ++y) {
+        for (int x = 0; x < GRID_SIZE; ++x) {
+            result[y][x] = static_cast<int>(m_board[y][x]);
         }
     }
     return result;
 }
 
 void GameBoard::setBoard(const QVector<QVector<int>>& board) {
-    for (int i = 0; i < board.size() && i < GRID_SIZE; ++i) {
-        for (int j = 0; j < board[i].size() && j < GRID_SIZE; ++j) {
-            m_board[i][j] = static_cast<CellState>(board[i][j]);
+    for (int y = 0; y < board.size() && y < GRID_SIZE; ++y) {
+        for (int x = 0; x < board[y].size() && x < GRID_SIZE; ++x) {
+            m_board[y][x] = static_cast<CellState>(board[y][x]);
         }
     }
     update();
 }
 
+
+bool GameBoard::makeShot(const QPoint& position) {
+    if (position.x() < 0 || position.x() >= GRID_SIZE ||
+        position.y() < 0 || position.y() >= GRID_SIZE)
+        return false;
+
+    // Проверяем, не стреляли ли уже в эту клетку
+    if (m_board[position.y()][position.x()] == CellState::HIT || 
+        m_board[position.y()][position.x()] == CellState::MISS ||
+        m_board[position.y()][position.x()] == CellState::SUNK)
+        return false;
+
+    // Если это поле компьютера, то мы не видим его корабли
+    if (!m_isPlayerBoard) {
+        if (m_board[position.y()][position.x()] == CellState::SHIP) {
+            m_board[position.y()][position.x()] = CellState::HIT;
+            update();
+            return true;
+        } else {
+            m_board[position.y()][position.x()] = CellState::MISS;
+            update();
+            return false;
+        }
+    } else {
+        // Для поля игрока
+        if (m_board[position.y()][position.x()] == CellState::SHIP) {
+            m_board[position.y()][position.x()] = CellState::HIT;
+            update();
+            return true;
+        } else if (m_board[position.y()][position.x()] == CellState::EMPTY) {
+            m_board[position.y()][position.x()] = CellState::MISS;
+            update();
+            return false;
+        }
+    }
+    return false;
+}
+
+GameBoard::CellState GameBoard::getCellState(const QPoint& position) const {
+    if (position.x() < 0 || position.x() >= GRID_SIZE ||
+        position.y() < 0 || position.y() >= GRID_SIZE)
+        return CellState::EMPTY;
+    return m_board[position.y()][position.x()];
+}
+
+void GameBoard::setCellState(const QPoint& position, CellState state) {
+    if (position.x() < 0 || position.x() >= GRID_SIZE ||
+        position.y() < 0 || position.y() >= GRID_SIZE)
+        return;
+    m_board[position.y()][position.x()] = state;
+    update();
+}
+
 void GameBoard::markHit(const QPoint& position)
 {
-    if (position.x() >= 0 && position.x() < BOARD_SIZE && 
-        position.y() >= 0 && position.y() < BOARD_SIZE) {
-        m_board[position.y()][position.x()] = HIT;
+    if (position.x() >= 0 && position.x() < GRID_SIZE && 
+        position.y() >= 0 && position.y() < GRID_SIZE) {
+        m_board[position.y()][position.x()] = CellState::HIT;
         update();
     }
 }
 
 void GameBoard::markMiss(const QPoint& position)
 {
-    if (position.x() >= 0 && position.x() < BOARD_SIZE && 
-        position.y() >= 0 && position.y() < BOARD_SIZE) {
-        m_board[position.y()][position.x()] = MISS;
+    if (position.x() >= 0 && position.x() < GRID_SIZE && 
+        position.y() >= 0 && position.y() < GRID_SIZE) {
+        m_board[position.y()][position.x()] = CellState::MISS;
         update();
     }
 }
 
-int GameBoard::getShipSizeAt(const QPoint& position) const {
-    if (position.x() < 0 || position.x() >= BOARD_SIZE || position.y() < 0 || position.y() >= BOARD_SIZE)
-        return 0;
-    // Если клетка содержит корабль, возвращаем размер 1 (или доработайте под вашу структуру)
-    if (m_board[position.y()][position.x()] == SHIP)
-        return 1;
-    return 0;
+GameBoard::ShipSize GameBoard::getShipType(const QPoint& pos) const 
+{
+    if (pos.x() < 0 || pos.x() >= GRID_SIZE || pos.y() < 0 || pos.y() >= GRID_SIZE) {
+        return ShipSize::SUBMARINE; // Возвращаем значение по умолчанию
+    }
+
+    // Проверяем размер корабля по количеству соседних клеток с кораблем
+    int shipSize = 1;
+    
+    // Проверяем горизонтальное направление
+    for (int x = pos.x() - 1; x >= 0; --x) {
+        if (m_board[pos.y()][x] == CellState::SHIP) {
+            shipSize++;
+        } else {
+            break;
+        }
+    }
+    for (int x = pos.x() + 1; x < GRID_SIZE; ++x) {
+        if (m_board[pos.y()][x] == CellState::SHIP) {
+            shipSize++;
+        } else {
+            break;
+        }
+    }
+
+    // Проверяем вертикальное направление
+    for (int y = pos.y() - 1; y >= 0; --y) {
+        if (m_board[y][pos.x()] == CellState::SHIP) {
+            shipSize++;
+        } else {
+            break;
+        }
+    }
+    for (int y = pos.y() + 1; y < GRID_SIZE; ++y) {
+        if (m_board[y][pos.x()] == CellState::SHIP) {
+            shipSize++;
+        } else {
+            break;
+        }
+    }
+
+    // Определяем тип корабля по размеру
+    switch (shipSize) {
+        case 1: return ShipSize::SUBMARINE;
+        case 2: return ShipSize::DESTROYER;
+        case 3: return ShipSize::CRUISER;
+        case 4: return ShipSize::BATTLESHIP;
+        default: return ShipSize::SUBMARINE;
+    }
 }
 
-void GameBoard::clearBoard() {
-    for (int y = 0; y < BOARD_SIZE; ++y)
-        for (int x = 0; x < BOARD_SIZE; ++x)
-            m_board[y][x] = EMPTY;
+void GameBoard::markSunkShip(const QPoint& position)
+{
+    // Собираем все клетки корабля
+    QVector<QPoint> shipCells;
+    shipCells.append(position);
+    // Влево
+    int x = position.x() - 1;
+    while (x >= 0 && (m_board[position.y()][x] == CellState::SHIP || m_board[position.y()][x] == CellState::HIT)) {
+        shipCells.append(QPoint(x, position.y()));
+        x--;
+    }
+    // Вправо
+    x = position.x() + 1;
+    while (x < GRID_SIZE && (m_board[position.y()][x] == CellState::SHIP || m_board[position.y()][x] == CellState::HIT)) {
+        shipCells.append(QPoint(x, position.y()));
+        x++;
+    }
+    // Вверх
+    int y = position.y() - 1;
+    while (y >= 0 && (m_board[y][position.x()] == CellState::SHIP || m_board[y][position.x()] == CellState::HIT)) {
+        shipCells.append(QPoint(position.x(), y));
+        y--;
+    }
+    // Вниз
+    y = position.y() + 1;
+    while (y < GRID_SIZE && (m_board[y][position.x()] == CellState::SHIP || m_board[y][position.x()] == CellState::HIT)) {
+        shipCells.append(QPoint(position.x(), y));
+        y++;
+    }
+    // Помечаем все клетки корабля как потопленные
+    for (const QPoint& p : shipCells) {
+        m_board[p.y()][p.x()] = CellState::SUNK;
+    }
+    // Отмечаем клетки вокруг корабля
+    markAroundSunkShip(shipCells);
     update();
 }
