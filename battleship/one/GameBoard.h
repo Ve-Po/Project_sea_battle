@@ -52,6 +52,8 @@ public:
     void markAroundSunkShip(const QVector<QPoint>& shipCells);
     ShipSize getShipType(const QPoint& pos) const;
     void markSunkShip(const QPoint& position);
+    QVector<QPoint> findShipCells(const QPoint& position) const;
+    QVector<QVector<int>> getInitialBoard() const;
 
 signals:
     void cellClicked(const QPoint& position);

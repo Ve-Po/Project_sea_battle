@@ -1,4 +1,4 @@
-#include "gameboard.h"
+#include "GameBoard.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QRandomGenerator>
@@ -112,20 +112,20 @@ void GameBoard::markShot(const QPoint& position, CellState result)
         position.y() < 0 || position.y() >= GRID_SIZE)
         return;
 
-    // Проверяем, что клетка еще не была обстреляна
+    // Если уже стреляли в эту клетку - ничего не делаем
     if (m_board[position.y()][position.x()] == CellState::HIT ||
-        m_board[position.y()][position.x()] == CellState::MISS) {
+        m_board[position.y()][position.x()] == CellState::MISS ||
+        m_board[position.y()][position.x()] == CellState::SUNK) {
         return;
     }
 
     if (result == CellState::HIT) {
         m_board[position.y()][position.x()] = CellState::HIT;
-        // Если весь корабль подбит — потопить его
+        // Проверяем, не потоплен ли корабль
         if (isShipSunk(position)) {
-            markSunk(position);
+            markSunkShip(position);
         }
-    }
-    else if (result == CellState::MISS) {
+    } else if (result == CellState::MISS) {
         m_board[position.y()][position.x()] = CellState::MISS;
     }
     update();
@@ -271,24 +271,33 @@ void GameBoard::drawCells(QPainter &painter)
     for (int y = 0; y < GRID_SIZE; ++y) {
         for (int x = 0; x < GRID_SIZE; ++x) {
             QRect rect = cellRect(y, x);
+            CellState state = m_board[y][x];
 
-            switch (m_board[y][x]) {
+            switch (state) {
             case CellState::SHIP:
+                // Корабли противника не показываем (если это не наша доска)
                 if (m_isPlayerBoard) {
-                    painter.fillRect(rect, QColor(100, 100, 200)); // Синий цвет для кораблей игрока
+                    painter.fillRect(rect, QColor(100, 100, 200)); // Синий для наших кораблей
                 }
                 break;
             case CellState::HIT:
-                painter.fillRect(rect, QColor(255, 0, 0)); // Красный цвет для попадания
+                // Попадание - красная клетка с крестом
+                painter.fillRect(rect, Qt::red);
                 painter.drawLine(rect.topLeft(), rect.bottomRight());
                 painter.drawLine(rect.topRight(), rect.bottomLeft());
                 break;
             case CellState::MISS:
-                painter.fillRect(rect, QColor(200, 200, 200)); // Серый цвет для промаха
+                // Промах - серая клетка с кружком
+                painter.fillRect(rect, QColor(200, 200, 200));
                 painter.drawEllipse(rect.adjusted(5, 5, -5, -5));
                 break;
             case CellState::SUNK:
-                painter.fillRect(rect, Qt::black); // Черный цвет для потопленного корабля
+                // Потопленный корабль - черная клетка с красным крестом
+                painter.fillRect(rect, Qt::black);
+                painter.setPen(Qt::red);
+                painter.drawLine(rect.topLeft(), rect.bottomRight());
+                painter.drawLine(rect.topRight(), rect.bottomLeft());
+                painter.setPen(Qt::black); // Восстанавливаем цвет пера
                 break;
             default:
                 break;
@@ -296,7 +305,6 @@ void GameBoard::drawCells(QPainter &painter)
         }
     }
 }
-
 QRect GameBoard::cellRect(int row, int col) const
 {
     return QRect(MARGIN + col * CELL_SIZE + 1,
@@ -417,15 +425,15 @@ void GameBoard::markSunk(const QPoint& position)
 
 void GameBoard::markAroundSunkShip(const QVector<QPoint>& shipCells)
 {
-    // Для каждой клетки корабля отмечаем вокруг неё клетки как MISS
+    qDebug() << "[DEBUG] markAroundSunkShip called. isPlayerBoard=" << m_isPlayerBoard;
     for (const QPoint& p : shipCells) {
         for (int dy = -1; dy <= 1; ++dy) {
             for (int dx = -1; dx <= 1; ++dx) {
                 int nx = p.x() + dx;
                 int ny = p.y() + dy;
                 if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
-                    // Не трогаем клетки самого корабля
                     if (m_board[ny][nx] == CellState::EMPTY) {
+                        qDebug() << "[DEBUG] markAroundSunkShip: MISS set at (" << nx << "," << ny << ")";
                         m_board[ny][nx] = CellState::MISS;
                     }
                 }
@@ -433,7 +441,6 @@ void GameBoard::markAroundSunkShip(const QVector<QPoint>& shipCells)
         }
     }
 }
-
 void GameBoard::mousePressEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton) {
@@ -449,6 +456,7 @@ void GameBoard::mousePressEvent(QMouseEvent *event)
 }
 
 QVector<QVector<int>> GameBoard::getBoard() const {
+    qDebug() << "[DEBUG] getBoard called. isPlayerBoard=" << m_isPlayerBoard;
     QVector<QVector<int>> result(GRID_SIZE, QVector<int>(GRID_SIZE));
     for (int y = 0; y < GRID_SIZE; ++y) {
         for (int x = 0; x < GRID_SIZE; ++x) {
@@ -459,8 +467,12 @@ QVector<QVector<int>> GameBoard::getBoard() const {
 }
 
 void GameBoard::setBoard(const QVector<QVector<int>>& board) {
+    qDebug() << "[DEBUG] setBoard called. isPlayerBoard=" << m_isPlayerBoard;
     for (int y = 0; y < board.size() && y < GRID_SIZE; ++y) {
         for (int x = 0; x < board[y].size() && x < GRID_SIZE; ++x) {
+            if (board[y][x] == static_cast<int>(CellState::MISS)) {
+                qDebug() << "[DEBUG] setBoard: MISS detected at (" << x << "," << y << ")";
+            }
             m_board[y][x] = static_cast<CellState>(board[y][x]);
         }
     }
@@ -513,6 +525,7 @@ GameBoard::CellState GameBoard::getCellState(const QPoint& position) const {
 }
 
 void GameBoard::setCellState(const QPoint& position, CellState state) {
+    qDebug() << "[DEBUG] setCellState(" << position << "," << static_cast<int>(state) << ") isPlayerBoard=" << m_isPlayerBoard;
     if (position.x() < 0 || position.x() >= GRID_SIZE ||
         position.y() < 0 || position.y() >= GRID_SIZE)
         return;
@@ -591,38 +604,53 @@ GameBoard::ShipSize GameBoard::getShipType(const QPoint& pos) const
 
 void GameBoard::markSunkShip(const QPoint& position)
 {
-    // Собираем все клетки корабля
-    QVector<QPoint> shipCells;
-    shipCells.append(position);
-    // Влево
-    int x = position.x() - 1;
-    while (x >= 0 && (m_board[position.y()][x] == CellState::SHIP || m_board[position.y()][x] == CellState::HIT)) {
-        shipCells.append(QPoint(x, position.y()));
-        x--;
-    }
-    // Вправо
-    x = position.x() + 1;
-    while (x < GRID_SIZE && (m_board[position.y()][x] == CellState::SHIP || m_board[position.y()][x] == CellState::HIT)) {
-        shipCells.append(QPoint(x, position.y()));
-        x++;
-    }
-    // Вверх
-    int y = position.y() - 1;
-    while (y >= 0 && (m_board[y][position.x()] == CellState::SHIP || m_board[y][position.x()] == CellState::HIT)) {
-        shipCells.append(QPoint(position.x(), y));
-        y--;
-    }
-    // Вниз
-    y = position.y() + 1;
-    while (y < GRID_SIZE && (m_board[y][position.x()] == CellState::SHIP || m_board[y][position.x()] == CellState::HIT)) {
-        shipCells.append(QPoint(position.x(), y));
-        y++;
-    }
-    // Помечаем все клетки корабля как потопленные
+    qDebug() << "[DEBUG] markSunkShip called at (" << position.x() << "," << position.y() << ") isPlayerBoard=" << m_isPlayerBoard;
+    QVector<QPoint> shipCells = findShipCells(position);
     for (const QPoint& p : shipCells) {
         m_board[p.y()][p.x()] = CellState::SUNK;
     }
-    // Отмечаем клетки вокруг корабля
     markAroundSunkShip(shipCells);
     update();
+}
+
+
+QVector<QPoint> GameBoard::findShipCells(const QPoint& position) const
+{
+    QVector<QPoint> shipCells;
+    shipCells.append(position);
+    
+    // Проверяем все 4 направления
+    const QVector<QPair<int, int>> directions = {
+        {-1, 0}, {1, 0}, {0, -1}, {0, 1}
+    };
+    
+    for (const auto& dir : directions) {
+        int x = position.x() + dir.first;
+        int y = position.y() + dir.second;
+        
+        while (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
+            if (m_board[y][x] == CellState::SHIP || m_board[y][x] == CellState::HIT) {
+                shipCells.append(QPoint(x, y));
+                x += dir.first;
+                y += dir.second;
+            } else {
+                break;
+            }
+        }
+    }
+    
+    return shipCells;
+}
+
+QVector<QVector<int>> GameBoard::getInitialBoard() const {
+    QVector<QVector<int>> result(GRID_SIZE, QVector<int>(GRID_SIZE));
+    for (int y = 0; y < GRID_SIZE; ++y) {
+        for (int x = 0; x < GRID_SIZE; ++x) {
+            if (m_board[y][x] == CellState::SHIP)
+                result[y][x] = static_cast<int>(CellState::SHIP);
+            else
+                result[y][x] = static_cast<int>(CellState::EMPTY);
+        }
+    }
+    return result;
 }
