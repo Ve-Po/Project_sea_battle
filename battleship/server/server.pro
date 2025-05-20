@@ -6,6 +6,16 @@ CONFIG -= app_bundle
 
 TEMPLATE = app
 
+# Пути к заголовочным файлам Qt
+INCLUDEPATH += /usr/include/qt5
+INCLUDEPATH += /usr/include/qt5/QtCore
+INCLUDEPATH += /usr/include/qt5/QtNetwork
+
+# Настройки компиляции
+QMAKE_CXXFLAGS += -Wall -Wextra
+QMAKE_CXXFLAGS_DEBUG += -g
+QMAKE_CXXFLAGS_RELEASE += -O2
+
 SOURCES += \
     server.cpp \
     gameserver.cpp

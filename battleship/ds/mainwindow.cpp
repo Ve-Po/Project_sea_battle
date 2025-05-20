@@ -70,6 +70,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_networkClient, &NetworkClient::shotReceived, this, &MainWindow::onShotReceived);
     connect(m_networkClient, &NetworkClient::turnChanged, this, &MainWindow::onTurnChanged);
     connect(m_networkClient, &NetworkClient::gameStartConfirmed, this, &MainWindow::onGameStartConfirmed);
+    connect(m_networkClient, &NetworkClient::waitingForOpponent, this, &MainWindow::onWaitingForOpponent);
     } else {
         m_networkClient = nullptr;
     }
@@ -655,14 +656,12 @@ void MainWindow::updateGameState()
     }
 }
 
-void MainWindow::onGameOver(const QString &winner)
-{
-    QString message = winner == m_networkClient->username() ? "Вы победили!" : "Вы проиграли!";
+void MainWindow::onGameOver(bool youWin) {
+    QString message = youWin ? "Вы победили!" : "Вы проиграли!";
     addChatMessage("Система", message);
     updateStatusMessage(message);
     QMessageBox::information(this, "Игра окончена", message);
 }
-
 void MainWindow::onOpponentBoardClicked(const QPoint& pos)
 {
     if (!m_isGameStarted || !m_isMyTurn) return;
@@ -701,25 +700,38 @@ void MainWindow::onGameModeChanged(bool networkMode) {
 
 void MainWindow::onShotReceived(int x, int y)
 {
-    qDebug() << "Получен выстрел от противника:" << x << y;
     QPoint position(x, y);
-
+    qDebug() << "Получен выстрел от противника в (" << x << "," << y << ")";
+    
     // Проверяем попадание
-    GameBoard::CellState result = m_ownBoard->checkShot(position);
-    bool hit = (result == GameBoard::CellState::SHIP);
-
+    bool hit = m_ownBoard->makeShot(position);
+    
     // Отправляем результат выстрела
-    m_networkClient->sendShotResult(x, y, hit);
-
+    if (m_networkClient) {
+        m_networkClient->sendShotResult(x, y, hit);
+    }
+    
     // Обновляем доску
-    m_ownBoard->markShot(position, hit ? GameBoard::CellState::HIT : GameBoard::CellState::MISS);
-
-    // Проверяем победу
+    m_ownBoard->setCellState(position, 
+        hit ? GameBoard::CellState::HIT : GameBoard::CellState::MISS);
+    
+    // Если попали, проверяем, не потоплен ли корабль
+    if (hit && m_ownBoard->isShipSunk(position)) {
+        m_ownBoard->markSunkShip(position);
+        if (m_networkClient) {
+            m_networkClient->sendShipSunk(x, y);
+        }
+    }
+    
+    // Проверяем, не закончилась ли игра
     if (m_ownBoard->allShipsSunk()) {
-        onGameOver(m_networkClient->username());
+        if (m_networkClient) {
+            m_networkClient->gameOver(false); // false = мы проиграли
+        }
+        QMessageBox::information(this, "Игра окончена", "Все ваши корабли потоплены!");
+        resetGame();
     }
 }
-
 void MainWindow::onTurnChanged(bool isMyTurn)
 {
     m_isMyTurn = isMyTurn;
@@ -1060,7 +1072,7 @@ void MainWindow::handleShipSunk(const QPoint& position)
     // Отмечаем потопленный корабль
     if (m_networkMode) {
         // В сетевом режиме отправляем сообщение о потопленном корабле
-        m_networkClient->sendShipSunkMessage(position.x(), position.y());
+        m_networkClient->sendShipSunk(position.x(), position.y());
     } else {
         // В режиме с компьютером просто обновляем UI
         m_opponentBoard->markSunk(position);
@@ -1161,8 +1173,12 @@ void MainWindow::updateShipSelectionUI()
 
 void MainWindow::onGameStartConfirmed()
 {
+    qDebug() << "GAMAMMA";
     m_gameActive = true;
     m_isMyTurn = true;
+   // m_ownBoard->setBoard(m_placementBoard->getBoard());
+   //m_isMyTurn = true;
+    switchToPage(1);
     updateGameState();
     updateStatusMessage("Игра началась! Ваш ход");
 }

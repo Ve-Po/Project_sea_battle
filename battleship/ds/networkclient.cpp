@@ -1,110 +1,167 @@
 #include "networkclient.h"
 #include <QDebug>
-#include <QJsonObject>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QJsonArray>
-#include <QTimer>
 
-NetworkClient::NetworkClient(QObject *parent) : QObject(parent) {
-    m_socket = new QUdpSocket(this);
-    m_reconnectTimer = new QTimer(this);
-    m_reconnectTimer->setInterval(5000); // 5 секунд между попытками переподключения
+NetworkClient::NetworkClient(QObject *parent) : QObject(parent), // Инициализация клиента
+    m_socket(new QUdpSocket(this)),
+    m_reconnectTimer(new QTimer(this)),
+    m_pingTimer(new QTimer(this)),
+    m_isConnected(false),
+    m_isYourTurn(false)
+{
+    // Настройка интервалов таймеров
+    m_reconnectTimer->setInterval(5000);    // 5 секунд между попытками переподключения
+    m_pingTimer->setInterval(10000);       // Пинг каждые 10 секунд
     
-    m_pingTimer = new QTimer(this);
-    m_pingTimer->setInterval(1000); // Пинг каждую секунду
-    
+    // Соединение сигналов и слотов
     connect(m_socket, &QUdpSocket::readyRead, this, &NetworkClient::onReadyRead);
-    connect(m_socket, QOverload<QAbstractSocket::SocketError>::of(&QUdpSocket::error),
-            this, &NetworkClient::onError);
+    connect(m_socket, &QUdpSocket::errorOccurred, this, &NetworkClient::onError);
     connect(m_reconnectTimer, &QTimer::timeout, this, &NetworkClient::tryReconnect);
     connect(m_pingTimer, &QTimer::timeout, this, &NetworkClient::sendPing);
 }
 
-void NetworkClient::connectToServer(const QString &host, quint16 port) {
+void NetworkClient::connectToServer(const QString &host, quint16 port) //Подключение к серверу
+{
     qDebug() << "Подключение к серверу:" << host << ":" << port;
+    
+    // Сохраняем параметры подключения
     m_host = host;
     m_port = port;
-    m_serverAddress = QHostAddress(host);
     
+    // Пытаемся преобразовать адрес
+    if (!m_serverAddress.setAddress(host)) {
+        qDebug() << "Неверный адрес сервера";
+        emit error("Неверный адрес сервера");
+        return;
+    }
+    
+    // Закрываем сокет, если он уже был привязан
     if (m_socket->state() == QAbstractSocket::BoundState) {
         m_socket->close();
     }
     
-    if (m_socket->bind(QHostAddress::Any, 0, QUdpSocket::DefaultForPlatform)) {  // Используем случайный порт
-        qDebug() << "UDP сокет успешно привязан на порту:" << m_socket->localPort();
+    // Пытаемся привязать сокет к случайному порту
+    if (m_socket->bind(QHostAddress::Any, 0, QUdpSocket::DefaultForPlatform)) {
+        qDebug() << "UDP сокет привязан к порту:" << m_socket->localPort();
+        m_isConnected = true;
         m_pingTimer->start();
         emit connected();
     } else {
-        qDebug() << "Не удалось привязать UDP сокет";
+        qDebug() << "Ошибка привязки сокета:" << m_socket->errorString();
         m_reconnectTimer->start();
+        emit error("Ошибка подключения к серверу");
     }
 }
 
-void NetworkClient::tryReconnect() {
-    if (m_socket->state() != QAbstractSocket::BoundState) {
-        qDebug() << "Попытка переподключения к серверу:" << m_host << ":" << m_port;
-        if (m_socket->bind()) {
-            m_pingTimer->start();
-            emit connected();
-        }
-    } else {
-        m_reconnectTimer->stop();
+void NetworkClient::disconnectFromServer()
+{
+    // Отправляем сообщение о выходе, если подключены
+    if (m_isConnected && !m_username.isEmpty()) {
+        QJsonObject json;
+        json["type"] = "disconnect";
+        json["username"] = m_username;
+        sendJson(json);
     }
-}
-
-void NetworkClient::onError(QAbstractSocket::SocketError socketError) {
-    qDebug() << "Ошибка сокета:" << m_socket->errorString();
-    emit error(m_socket->errorString());
     
-    if (socketError != QAbstractSocket::RemoteHostClosedError) {
-        m_reconnectTimer->start();
+    // Останавливаем все соединения и таймеры
+    m_socket->close();
+    m_pingTimer->stop();
+    m_reconnectTimer->stop();
+    m_isConnected = false;
+    
+    emit disconnected();
+}
+
+void NetworkClient::tryReconnect()
+{
+    if (!m_isConnected) {
+        qDebug() << "Попытка переподключения...";
+        connectToServer(m_host, m_port);
     }
 }
 
-void NetworkClient::sendPing() {
+
+void NetworkClient::findGame() {
+    if (!validateConnection()) return;
+    
+    qDebug() << "Поиск доступной игры";
     QJsonObject json;
-    json["type"] = "ping";
+    json["type"] = "ready";
     json["username"] = m_username;
     sendJson(json);
 }
 
-void NetworkClient::login(const QString &username) {
-    if (m_socket->state() != QAbstractSocket::BoundState) {
-        qDebug() << "Нет подключения к серверу при попытке входа";
+void NetworkClient::login(const QString &username) //Логин ---> сервер обрабатывает в handleLogin
+{
+    if (!m_isConnected) {
         emit error("Нет подключения к серверу");
         return;
     }
     
-    qDebug() << "Отправка логина:" << username;
+    if (username.isEmpty()) {
+        emit error("Имя пользователя не может быть пустым");
+        return;
+    }
+    
+    qDebug() << "Авторизация пользователя:" << username;
     m_username = username;
+    
     QJsonObject json;
     json["type"] = "login";
     json["username"] = username;
     sendJson(json);
 }
 
-void NetworkClient::findGame() {
-    if (m_socket->state() != QAbstractSocket::BoundState) {
-        qDebug() << "Нет подключения к серверу при поиске игры";
-        emit error("Нет подключения к серверу");
-        return;
-    }
+void NetworkClient::createGame() //создание новой игры -----> server: handleNewGame
+{
+    if (!validateConnection()) return;
     
-    qDebug() << "Поиск игры";
+    qDebug() << "Создание новой игры";
     QJsonObject json;
-    json["type"] = "find_game";
+    json["type"] = "new_game";
     json["username"] = m_username;
     sendJson(json);
 }
 
-void NetworkClient::sendShot(int x, int y) {
-    if (m_socket->state() != QAbstractSocket::BoundState) {
-        qDebug() << "Нет подключения к серверу при отправке выстрела";
-        emit error("Нет подключения к серверу");
+void NetworkClient::joinGame(const QString &gameId) // присоединение к игре -----> server handljoingame
+{
+    if (!validateConnection()) return;
+    
+    qDebug() << "Присоединение к игре:" << gameId;
+    QJsonObject json;
+    json["type"] = "join_game";
+    json["username"] = m_username;
+    
+    if (!gameId.isEmpty()) {
+        json["game_id"] = gameId;
+        m_gameId = gameId;
+    }
+    
+    sendJson(json);
+}
+
+void NetworkClient::sendReady()
+{
+    if (!validateConnection()) return;
+    
+    qDebug() << "Подтверждение готовности";
+    QJsonObject json;
+    json["type"] = "ready";
+    json["username"] = m_username;
+    sendJson(json);
+}
+
+void NetworkClient::sendShot(int x, int y)
+{
+    if (!validateConnection()) return;
+    if (!m_isYourTurn) {
+        emit error("Сейчас не ваш ход");
         return;
     }
     
-    qDebug() << "Отправка выстрела:" << x << y;
+    qDebug() << "Отправка выстрела в (" << x << "," << y << ")";
     QJsonObject json;
     json["type"] = "shot";
     json["username"] = m_username;
@@ -113,33 +170,14 @@ void NetworkClient::sendShot(int x, int y) {
     sendJson(json);
 }
 
-void NetworkClient::sendReady() {
-    qDebug() << "sendReady: начало метода";
-    if (m_socket->state() != QAbstractSocket::BoundState) {
-        qDebug() << "sendReady: нет подключения к серверу";
-        emit error("Нет подключения к серверу");
-        return;
-    }
+void NetworkClient::sendBoard(const QVector<QVector<int>> &board)
+{
+    if (!validateConnection()) return;
     
-    qDebug() << "sendReady: отправка сообщения о готовности";
+    qDebug() << "Отправка расстановки кораблей";
     QJsonObject json;
-    json["type"] = "ready";
+    json["type"] = "board";
     json["username"] = m_username;
-    sendJson(json);
-    qDebug() << "sendReady: сообщение отправлено";
-}
-
-void NetworkClient::sendBoard(const QVector<QVector<int>> &board) {
-    if (m_socket->state() != QAbstractSocket::BoundState) {
-        qDebug() << "Нет подключения к серверу при отправке доски";
-        emit error("Нет подключения к серверу");
-        return;
-    }
-    
-    qDebug() << "Отправка доски";
-    QJsonObject request;
-    request["type"] = "board";
-    request["username"] = m_username;
     
     QJsonArray boardArray;
     for (const auto &row : board) {
@@ -150,16 +188,40 @@ void NetworkClient::sendBoard(const QVector<QVector<int>> &board) {
         boardArray.append(rowArray);
     }
     
-    request["board"] = boardArray;
-    sendJson(request);
+    json["board"] = boardArray;
+    sendJson(json);
 }
 
-void NetworkClient::sendChatMessage(const QString &message) {
-    if (m_socket->state() != QAbstractSocket::BoundState) {
-        qDebug() << "Нет подключения к серверу при отправке сообщения";
-        emit error("Нет подключения к серверу");
-        return;
-    }
+void NetworkClient::sendShotResult(int x, int y, bool hit)
+{
+    if (!validateConnection()) return;
+    
+    qDebug() << "Отправка результата выстрела:" << x << y << hit;
+    QJsonObject json;
+    json["type"] = "shot_result";
+    json["username"] = m_username;
+    json["x"] = x;
+    json["y"] = y;
+    json["hit"] = hit;
+    sendJson(json);
+}
+
+void NetworkClient::sendShipSunk(int x, int y)
+{
+    if (!validateConnection()) return;
+    
+    qDebug() << "Отправка сообщения о потоплении корабля:" << x << y;
+    QJsonObject json;
+    json["type"] = "ship_sunk";
+    json["username"] = m_username;
+    json["x"] = x;
+    json["y"] = y;
+    sendJson(json);
+}
+
+void NetworkClient::sendChatMessage(const QString &message)
+{
+    if (!validateConnection()) return;
     
     qDebug() << "Отправка сообщения в чат:" << message;
     QJsonObject json;
@@ -169,135 +231,206 @@ void NetworkClient::sendChatMessage(const QString &message) {
     sendJson(json);
 }
 
-void NetworkClient::sendShotResult(int x, int y, bool hit) {
-    if (m_socket->state() != QAbstractSocket::BoundState) {
-        qDebug() << "Нет подключения к серверу при отправке результата выстрела";
-        emit error("Нет подключения к серверу");
-        return;
-    }
-    QJsonObject response;
-    response["type"] = "shot_result";
-    response["x"] = x;
-    response["y"] = y;
-    response["hit"] = hit;
-    sendJson(response);
+void NetworkClient::sendPing()
+{
+    if (!m_isConnected) return;
+    
+    QJsonObject json;
+    json["type"] = "ping";
+    json["username"] = m_username;
+    sendJson(json);
 }
 
-void NetworkClient::onReadyRead() {
-    QByteArray datagram;
-    datagram.resize(m_socket->pendingDatagramSize());
-    QHostAddress sender;
-    quint16 senderPort;
+void NetworkClient::onReadyRead()
+{
+    while (m_socket->hasPendingDatagrams()) {
+        QNetworkDatagram datagram = m_socket->receiveDatagram();
+        QByteArray data = datagram.data();
+        
+        QJsonParseError parseError;
+        QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+        if (parseError.error != QJsonParseError::NoError) {
+            emit error("Ошибка разбора JSON: " + parseError.errorString());
+            continue;
+        }
 
-    m_socket->readDatagram(datagram.data(), datagram.size(), &sender, &senderPort);
-    
-    QJsonDocument doc = QJsonDocument::fromJson(datagram);
-    if (doc.isNull()) {
-        qDebug() << "Ошибка при разборе JSON";
-        return;
-    }
-    
-    QJsonObject response = doc.object();
-    QString type = response["type"].toString();
-    qDebug() << "Получено сообщение типа:" << type;
-    
-    if (type == "game_found") {
-        QString opponent = response["opponent"].toString();
-        qDebug() << "game_found: получено сообщение game_found";
-        qDebug() << "game_found: opponent=" << opponent;
-        emit gameFound(opponent);
-        emit waitingForOpponent();
-    }
-    else if (type == "game_start") {
-        QString opponent = response["opponent"].toString();
-        bool waitingForReady = response["waiting_for_ready"].toBool();
-        qDebug() << "game_start: opponent=" << opponent << "waitingForReady=" << waitingForReady;
-        emit gameFound(opponent);
-        if (waitingForReady) {
-            sendReady();
+        QJsonObject json = doc.object();
+        QString type = json["type"].toString();
+
+        if (type == "error") {
+            emit error(json["message"].toString());
+        } else if (type == "login_response") {
+            emit loginResponse(json["success"].toBool());
+        } else if (type == "game_created") {
+            m_gameId = json["game_id"].toString();
+            emit gameCreated(m_gameId);
+        } else if (type == "game_found") {
+            m_opponent = json["opponent"].toString();
+            m_gameId = json["gameId"].toString();
+            emit gameFound(m_opponent, m_gameId);
+        } else if (type == "waiting_for_opponent") {
             emit waitingForOpponent();
-        } else {
+        } else if (type == "game_stazzzzrt") {
+            m_isYourTurn = json["yourTurn"].toBool();
+            m_opponent = json["opponent"].toString();
+            emit gameStarted(m_isYourTurn, m_opponent);
+        } else if (type == "game_start") {
             emit gameStartConfirmed();
+        } else if (type == "turn_changed") {
+            m_isYourTurn = json["yourTurn"].toBool();
+            emit turnChanged(m_isYourTurn);
+        } else if (type == "shot") {
+            emit shotReceived(json["x"].toInt(), json["y"].toInt());
+        } else if (type == "shot_result") {
+            emit shotResult(json["x"].toInt(), json["y"].toInt(), json["hit"].toBool());
+        } else if (type == "game_over") {
+            emit gameOver(json["youWin"].toBool());
+        } else if (type == "opponent_disconnected") {
+            emit opponentDisconnected();
+        } else if (type == "chat") {
+            emit chatMessageReceived(json["sender"].toString(), json["message"].toString());
+        } else if (type == "game_state") {
+            handleGameState(json);
+        } else if (type == "game_state_changed") {
+            handleGameStateChanged(json);
+        } else if (type == "player_ready") {
+            emit opponentReady(json["username"].toString());
+        } else if (type == "reconnect_response") {
+            handleReconnectResponse(json);
         }
     }
-    else if (type == "turn_change") {
-        bool yourTurn = response["your_turn"].toBool();
-        qDebug() << "turn_change: получено сообщение turn_change";
-        qDebug() << "turn_change: yourTurn=" << yourTurn;
-        qDebug() << "turn_change: отправляем сигнал turnChanged с параметром" << yourTurn;
-        emit turnChanged(yourTurn);
-        qDebug() << "turn_change: сигнал отправлен";
-    }
-    else if (type == "pong") {
-        // Игнорируем ответы на пинг
-        return;
-    }
-    else if (type == "login_response") {
-        bool success = response["success"].toBool();
-        qDebug() << "Ответ на логин:" << success;
-        emit loginResponse(success);
-    }
-    else if (type == "waiting") {
-        qDebug() << "Ожидание противника";
-        emit waitingForOpponent();
-        // Не повторяем поиск игры автоматически
-    }
-    else if (type == "error") {
-        QString message = response["message"].toString();
-        qDebug() << "Получена ошибка:" << message;
-        emit error(message);
-    }
-    else if (type == "shot") {
-        int x = response["x"].toInt();
-        int y = response["y"].toInt();
-        qDebug() << "Получен выстрел от противника:" << x << y;
-        emit shotReceived(x, y);
-    }
-    else if (type == "shot_result") {
-        int x = response["x"].toInt();
-        int y = response["y"].toInt();
-        bool hit = response["hit"].toBool();
-        qDebug() << "Результат выстрела:" << x << y << hit;
-        emit shotResult(x, y, hit);
-    }
-    else if (type == "game_over") {
-        QString winner = response["winner"].toString();
-        qDebug() << "Игра окончена, победитель:" << winner;
-        emit gameOver(winner);
-    }
-    else if (type == "chat") {
-        QString sender = response["sender"].toString();
-        QString message = response["message"].toString();
-        qDebug() << "Получено сообщение от" << sender << ":" << message;
-        emit chatMessageReceived(sender, message);
-    }
-    else if (type == "ready") {
-        QString opponent = response["opponent"].toString();
-        qDebug() << "Противник готов:" << opponent;
-        emit opponentReady();
-    }
-    else {
-        qDebug() << "Неизвестный тип сообщения:" << type;
-    }
 }
 
-void NetworkClient::sendJson(const QJsonObject &json) {
-    if (m_socket->state() != QAbstractSocket::BoundState) {
-        qDebug() << "Нет подключения к серверу";
+void NetworkClient::onError(QAbstractSocket::SocketError socketError)
+{
+    Q_UNUSED(socketError);
+    qDebug() << "Ошибка сокета:" << m_socket->errorString();
+    m_isConnected = false;
+    emit error(m_socket->errorString());
+    m_reconnectTimer->start();
+}
+
+bool NetworkClient::validateConnection()
+{
+    if (!m_isConnected) {
+        emit error("Нет подключения к серверу");
+        return false;
+    }
+    return true;
+}
+
+void NetworkClient::sendJson(const QJsonObject &json)
+{
+    if (!m_isConnected) {
         emit error("Нет подключения к серверу");
         return;
     }
     
     QJsonDocument doc(json);
-    QByteArray data = doc.toJson();
-    qDebug() << "Отправка данных:" << data;
-    m_socket->writeDatagram(data, m_serverAddress, m_port);
+    QByteArray data = doc.toJson(QJsonDocument::Compact);
+    
+    qint64 bytesSent = m_socket->writeDatagram(data, m_serverAddress, m_port);
+    if (bytesSent == -1) {
+        qDebug() << "Ошибка отправки данных:" << m_socket->errorString();
+        emit error("Ошибка отправки данных");
+    }
 }
 
-void NetworkClient::sendShipSunkMessage(int x, int y) {
+void NetworkClient::reconnect()
+{
+    if (m_isConnected) {
+        return;
+    }
+
+    m_reconnectAttempts++;
+    emit reconnecting();
+
     QJsonObject json;
-    json["type"] = "ship_sunk";
-    json["x"] = x;
-    json["y"] = y;
+    json["type"] = "reconnect";
+    json["username"] = m_username;
+    json["gameId"] = m_gameId;
     sendJson(json);
-} 
+}
+
+void NetworkClient::handleReconnectResponse(const QJsonObject &json)
+{
+    if (json["success"].toBool()) {
+        m_isConnected = true;
+        m_reconnectAttempts = 0;
+        emit connected();
+        
+        // Обновляем состояние игры
+        if (json.contains("gameState")) {
+            updateGameState(json["gameState"].toObject());
+        }
+    } else {
+        emit error(json["message"].toString());
+    }
+}
+
+void NetworkClient::handleGameState(const QJsonObject &json)
+{
+    updateGameState(json);
+    emit gameStateReceived(json);
+}
+
+void NetworkClient::handleGameStateChanged(const QJsonObject &json)
+{
+    updateGameState(json);
+    emit gameStateChanged(json);
+}
+
+void NetworkClient::updateGameState(const QJsonObject &state)
+{
+    if (state.contains("isYourTurn")) {
+        m_isYourTurn = state["isYourTurn"].toBool();
+        emit turnChanged(m_isYourTurn);
+    }
+
+    if (state.contains("yourBoard")) {
+        QJsonArray boardArray = state["yourBoard"].toArray();
+        m_board.clear();
+        m_board.resize(10);
+        for (int i = 0; i < 10; i++) {
+            m_board[i].resize(10);
+            QJsonArray row = boardArray[i].toArray();
+            for (int j = 0; j < 10; j++) {
+                m_board[i][j] = row[j].toInt();
+            }
+        }
+    }
+
+    if (state.contains("lastShotX") && state.contains("lastShotY")) {
+        int x = state["lastShotX"].toInt();
+        int y = state["lastShotY"].toInt();
+        bool hit = state["lastShotHit"].toBool();
+        emit shotResult(x, y, hit);
+    }
+}
+
+QVector<QVector<int>> NetworkClient::getBoard() const
+{
+    return m_board;
+}
+
+
+void NetworkClient::sendReadyWithBoard(const QVector<QVector<int>> &board) { //отправляем готовность с доской ---> server handleready
+    if (!validateConnection()) return;
+    
+    QJsonObject json;
+    json["type"] = "ready";
+    json["username"] = m_username;
+    
+    // Конвертируем доску в JSON
+    QJsonArray boardArray;
+    for (const auto &row : board) {
+        QJsonArray rowArray;
+        for (int cell : row) {
+            rowArray.append(cell);
+        }
+        boardArray.append(rowArray);
+    }
+    json["board"] = boardArray;
+    
+    sendJson(json);
+}

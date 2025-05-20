@@ -1,70 +1,87 @@
-#ifndef GAMESERVER_H
-#define GAMESERVER_H
+// gameserver.h
+#pragma once
 
 #include <QObject>
 #include <QUdpSocket>
+#include <QNetworkDatagram> // Добавлено для QNetworkDatagram
 #include <QMap>
 #include <QTimer>
-#include <QHostAddress>
-#include <QJsonObject>
-#include <QJsonDocument>
 #include <QJsonArray>
-#include <QDebug>
-#include <QQueue>
-#include <QVector>
-#include <QPoint>
+#include <QJsonObject>
+#include <QDateTime>
 
-struct Player {
+struct ClientInfo {
+    QString id;
     QString username;
     QHostAddress address;
     quint16 port;
-    bool isReady;
-    bool boardReceived;
-    QVector<QVector<int>> board;
-    QTimer* pingTimer;
-    int missedPings;
+    qint64 lastActive;
+    QString lobbyId;
+    bool isConnected;
+    QJsonArray savedBoard;
+    
+    ClientInfo() : port(0), lastActive(0), isConnected(true) {} // Конструктор по умолчанию
 };
 
-class GameServer : public QObject {
+struct Lobby {
+    QString id; 
+    QString player1;
+    QString player2;
+    bool player1Ready;
+    bool player2Ready;
+    QJsonArray player1Board;
+    QJsonArray player2Board;
+    bool isActive = false;      // Статус игры
+    bool player1Turn = false;   // Чей ход
+    qint64 lastActivity= 0;
+    
+    Lobby() : player1Ready(false), player2Ready(false), lastActivity(0) {} // Конструктор по умолчанию
+};
+
+class GameServer : public QObject
+{
     Q_OBJECT
 public:
     explicit GameServer(QObject *parent = nullptr);
-    bool start(quint16 port = 12345);
+    ~GameServer();
+
+    bool start(quint16 port);
     void stop();
 
 private slots:
     void onReadyRead();
     void onGameTimeout();
+    void onSessionTimeout();
+    void onPingTimerTimeout();
 
 private:
-    static const int PING_INTERVAL = 5000;  // 5 секунд
-    static const int MAX_MISSED_PINGS = 3;
-    static const int GAME_TIMEOUT = 300000;  // 5 минут
-    static const int BOARD_SIZE = 10;        // Размер игрового поля
+    QMap<QString, ClientInfo> m_clients;
+    QMap<QString, Lobby> m_lobbies;
+    QMap<QString, QString> m_clientAddressToId;
 
-    QUdpSocket* m_socket;
-    QMap<QString, Player*> m_players;
-    QMap<QString, QString> m_gamePairs;
-    QQueue<QString> m_waitingQueue;
-    QTimer* m_gameTimer;
-    
-    void handlePing(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json);
-    void handleLogin(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json);
-    void handleFindGame(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json);
-    void handleBoard(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json);
-    void handleShot(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json);
-    void handleReady(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json);
-    void handleChat(const QHostAddress& sender, quint16 senderPort, const QJsonObject& json);
-    void sendJson(const QHostAddress& address, quint16 port, const QJsonObject& json);
-    void startGame(const QString& player1, const QString& player2);
-    void checkGameTimeout();
-    bool checkBoard(const QVector<QVector<int>>& board);
-    void removePlayer(const QString& username);
-    void processWaitingQueue();
-    void tryStartGame(const QString& username);
-    bool checkShipSunk(const QVector<QVector<int>>& board, int x, int y);
-    bool areAllShipsSunk(const QVector<QVector<int>>& board);
-    void handleGameOver(const QString& winner, const QString& loser);
+    QUdpSocket *m_socket;
+    QTimer *m_gameTimer;
+    QTimer *m_sessionTimer;
+    QTimer *m_pingTimer;
+
+    const int GAME_TIMEOUT_MS = 120000;
+    const int SESSION_TIMEOUT_S = 60;
+    const int PING_INTERVAL_MS = 5000;
+
+    void handleLogin(const QJsonObject &json, const QString &clientId);
+    void handleReady(const QJsonObject &json, const QString &clientId);
+    void handleShot(const QJsonObject &json, const QString &clientId);
+    void handlePing(const QJsonObject &json, const QString &clientId);
+    void handleReconnect(const QJsonObject &json, const QString &clientId);
+
+    QString getClientId(const QHostAddress &address, quint16 port);
+    QString generateLobbyId() const;
+    bool validateBoard(const QJsonArray &board);
+    void cleanupLobby(const QString &lobbyId);
+    void startGame(const QString &lobbyId);
+    void sendJson(const QJsonObject &json, const QString &clientId);
+    void sendError(const QString &message, const QString &clientId);
+    void handleBoard(const QJsonObject &json, const QString &clientId);
+    bool validateClient(const QString &clientId);
+    void onError(QAbstractSocket::SocketError socketError);
 };
-
-#endif // GAMESERVER_H 

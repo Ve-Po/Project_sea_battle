@@ -74,7 +74,7 @@ private slots:
     void onGameFound(const QString& opponent);
     void onWaitingForOpponent();
     void onShotResult(int x, int y, bool hit);
-    void onGameOver(const QString& winner);
+    void onGameOver(bool youWin); 
     void onOpponentBoardClicked(const QPoint& pos);
     void onShotReceived(int x, int y);
     void onTurnChanged(bool isMyTurn);
