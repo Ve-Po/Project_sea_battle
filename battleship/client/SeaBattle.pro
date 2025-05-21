@@ -27,7 +27,6 @@ TARGET = seabattle_client
 
 FORMS += mainwindow.ui
 
-# Правила по умолчанию для развертывания
-qnx: target.path = /tmp/$${TARGET}/bin
-else: unix:!android: target.path = /usr/games/sea-battle
-!isEmpty(target.path): INSTALLS += target 
+# Правила для развертывания
+target.path = /usr/games/sea-battle
+INSTALLS += target 
